@@ -20,8 +20,16 @@ public sealed class PackageLibraryService
         }
 
         await using var stream = File.OpenRead(AppPaths.LibraryPath);
-        return await JsonSerializer.DeserializeAsync<List<LibraryPackageRecord>>(stream, JsonOptions).ConfigureAwait(false)
+        var records = await JsonSerializer.DeserializeAsync<List<LibraryPackageRecord>>(stream, JsonOptions).ConfigureAwait(false)
             ?? new List<LibraryPackageRecord>();
+
+        foreach (var record in records)
+        {
+            record.Analysis.IsShellCandidate = false;
+            record.Analysis.Warnings.RemoveAll(warning => warning.Equals("Candidato a casca", StringComparison.OrdinalIgnoreCase));
+        }
+
+        return records;
     }
 
     public async Task SaveAsync(IEnumerable<LibraryPackageRecord> records)
@@ -45,31 +53,61 @@ public sealed class PackageLibraryService
             Analysis = analysis
         };
 
-        var safeName = $"{record.Id:N}_{Path.GetFileName(package.StagedPath)}";
-        record.LocalPath = Path.Combine(AppPaths.LibraryFolder, safeName);
-        Directory.CreateDirectory(AppPaths.LibraryFolder);
-        File.Copy(package.StagedPath, record.LocalPath, overwrite: false);
+        record.LocalPath = package.StagedPath;
 
         records.Add(record);
         await SaveAsync(records).ConfigureAwait(false);
         return record;
     }
 
-    public async Task RemoveAsync(Guid recordId)
+    public async Task<IReadOnlyList<string>> RemoveAsync(Guid recordId, bool deleteOriginal)
     {
+        var warnings = new List<string>();
         var records = await LoadAsync().ConfigureAwait(false);
         var record = records.FirstOrDefault(item => item.Id == recordId);
         if (record is null)
         {
-            return;
+            return warnings;
         }
 
-        if (!string.IsNullOrWhiteSpace(record.LocalPath) && File.Exists(record.LocalPath))
+        if (deleteOriginal)
         {
-            File.Delete(record.LocalPath);
+            var packagePath = GetPackagePath(record);
+            if (!string.IsNullOrWhiteSpace(packagePath) && File.Exists(packagePath))
+            {
+                try
+                {
+                    File.Delete(packagePath);
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add($"Nao foi possivel apagar o arquivo do pacote: {ex.Message}");
+                }
+            }
         }
 
         records.Remove(record);
         await SaveAsync(records).ConfigureAwait(false);
+        return warnings;
+    }
+
+    private static string GetPackagePath(LibraryPackageRecord record)
+    {
+        if (!string.IsNullOrWhiteSpace(record.LocalPath) && File.Exists(record.LocalPath))
+        {
+            return record.LocalPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(record.Package.StagedPath) && File.Exists(record.Package.StagedPath))
+        {
+            return record.Package.StagedPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(record.Package.SourcePath) && File.Exists(record.Package.SourcePath))
+        {
+            return record.Package.SourcePath;
+        }
+
+        return string.Empty;
     }
 }

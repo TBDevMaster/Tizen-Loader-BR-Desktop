@@ -276,15 +276,6 @@ public sealed class PackageAnalyzerService
             || heuristicsText.Contains("circular")
             || heuristicsText.Contains("face");
 
-        result.IsShellCandidate = heuristicsText.Contains("webview")
-            || heuristicsText.Contains("browser")
-            || heuristicsText.Contains("http")
-            || heuristicsText.Contains("https")
-            || heuristicsText.Contains("url")
-            || heuristicsText.Contains("rss")
-            || heuristicsText.Contains("feed")
-            || heuristicsText.Contains("sync")
-            || heuristicsText.Contains("server");
 
         if (result.ProbablyInstallable)
         {
@@ -294,11 +285,6 @@ public sealed class PackageAnalyzerService
         if (result.IsWatchfaceCandidate)
         {
             result.Warnings.Add("Candidato a watchface");
-        }
-
-        if (result.IsShellCandidate)
-        {
-            result.Warnings.Add("Candidato a casca");
         }
 
         if (result.UsesInternet)

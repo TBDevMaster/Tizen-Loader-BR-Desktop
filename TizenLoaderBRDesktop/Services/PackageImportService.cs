@@ -67,21 +67,16 @@ public sealed class PackageImportService
 
     private static async Task<TizenPackageInfo> StageSingleFileAsync(string sourcePath, string workingFolder, CancellationToken cancellationToken)
     {
-        var stagingFolder = Path.Combine(workingFolder, "Imported", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(stagingFolder);
-        var destination = Path.Combine(stagingFolder, Path.GetFileName(sourcePath));
-        await using (var source = File.OpenRead(sourcePath))
-        await using (var target = File.Create(destination))
-        {
-            await source.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
-        }
-
-        return CreatePackageInfo(sourcePath, destination, false, sourcePath);
+        await Task.CompletedTask.ConfigureAwait(false);
+        return CreatePackageInfo(sourcePath, sourcePath, false, sourcePath);
     }
 
     private static async Task<TizenPackageInfo> StageExtractedCandidateAsync(string candidatePath, string containerPath, string workingFolder, CancellationToken cancellationToken)
     {
-        var stagingFolder = Path.Combine(workingFolder, "Imported", Guid.NewGuid().ToString("N"));
+        var baseFolder = Directory.Exists(workingFolder)
+            ? workingFolder
+            : Path.GetDirectoryName(containerPath) ?? AppPaths.WorkingFolder;
+        var stagingFolder = Path.Combine(baseFolder, "TizenExtraidos", Path.GetFileNameWithoutExtension(containerPath));
         Directory.CreateDirectory(stagingFolder);
         var destination = Path.Combine(stagingFolder, Path.GetFileName(candidatePath));
         await using (var source = File.OpenRead(candidatePath))

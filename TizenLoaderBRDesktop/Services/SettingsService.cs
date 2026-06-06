@@ -36,7 +36,7 @@ public sealed class SettingsService
         var settings = await JsonSerializer.DeserializeAsync<AppSettings>(stream, JsonOptions).ConfigureAwait(false);
         settings ??= CreateDefaultSettings();
 
-        if (string.IsNullOrWhiteSpace(settings.SdbPath))
+        if (string.IsNullOrWhiteSpace(settings.SdbPath) || !File.Exists(settings.SdbPath))
         {
             settings.SdbPath = DetectSdbPath();
         }
@@ -63,14 +63,39 @@ public sealed class SettingsService
 
     public string DetectSdbPath()
     {
-        var candidates = new[]
+        var appFolder = AppContext.BaseDirectory;
+        var candidates = new List<string>
         {
+            Path.Combine(appFolder, "Tools", "sdb", "sdb.exe"),
+            Path.Combine(AppContext.BaseDirectory, "sdb.exe"),
             @"C:\tizen-studio\tools\sdb.exe",
             @"C:\tizen-studio\platforms\wearable\tools\sdb.exe",
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "tizen-studio", "tools", "sdb.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "tizen-studio", "tools", "sdb.exe")
         };
 
+        candidates.AddRange(GetSingleFileExtractedSdbCandidates());
         return candidates.FirstOrDefault(File.Exists) ?? string.Empty;
+    }
+
+    private static IEnumerable<string> GetSingleFileExtractedSdbCandidates()
+    {
+        var bundleRoot = Path.Combine(Path.GetTempPath(), ".net", "TizenLoaderBRDesktop");
+        if (!Directory.Exists(bundleRoot))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            return Directory.EnumerateDirectories(bundleRoot)
+                .OrderByDescending(Directory.GetLastWriteTimeUtc)
+                .Select(folder => Path.Combine(folder, "Tools", "sdb", "sdb.exe"))
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
     }
 }

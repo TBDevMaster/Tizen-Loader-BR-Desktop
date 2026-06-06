@@ -30,6 +30,8 @@ public partial class MainViewModel : ObservableObject
         Devices = new ObservableCollection<SdbDeviceInfo>();
         InstalledApps = new ObservableCollection<InstalledTizenApp>();
         ImportCandidates = new ObservableCollection<TizenPackageInfo>();
+        LibraryView = CollectionViewSource.GetDefaultView(LibraryItems);
+        LibraryView.Filter = FilterLibraryItem;
         LibraryFilters = new ObservableCollection<string>
         {
             "Todos",
@@ -39,8 +41,6 @@ public partial class MainViewModel : ObservableObject
             "Candidatos"
         };
         SelectedLibraryFilter = "Todos";
-        LibraryView = CollectionViewSource.GetDefaultView(LibraryItems);
-        LibraryView.Filter = FilterLibraryItem;
         UsefulCommandsText = """
 sdb devices
 sdb shell pkgcmd -l -t wgt
@@ -89,7 +89,22 @@ sdb dlog
     private string downloadFolder = string.Empty;
 
     [ObservableProperty]
+    private string connectAddress = string.Empty;
+
+    [ObservableProperty]
     private string sourceUrl = string.Empty;
+
+    [ObservableProperty]
+    private string installLogText = "O log de instalacao aparece aqui.";
+
+    [ObservableProperty]
+    private string uninstallLogText = "O log de desinstalacao aparece aqui.";
+
+    [ObservableProperty]
+    private string deviceStatusText = "O status do relogio aparece aqui.";
+
+    [ObservableProperty]
+    private DeviceStatusInfo? deviceStatus;
 
     [ObservableProperty]
     private string statusText = "Pronto.";
@@ -113,8 +128,17 @@ sdb dlog
             SdbPath = _settings.SdbPath;
             WorkingFolder = _settings.WorkingFolder;
             DownloadFolder = _settings.DownloadFolder;
+            ConnectAddress = _settings.LastConnectAddress;
 
-            await ReloadLibraryAsync().ConfigureAwait(true);
+            if (Directory.Exists(DownloadFolder))
+            {
+                await RefreshLibraryFromFolderAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await ReloadLibraryAsync().ConfigureAwait(true);
+            }
+
             await RefreshDevicesAsync().ConfigureAwait(true);
             StatusText = "Biblioteca e dispositivos carregados.";
         }
@@ -145,9 +169,14 @@ sdb dlog
         _settings.DownloadFolder = value;
     }
 
+    partial void OnConnectAddressChanged(string value)
+    {
+        _settings.LastConnectAddress = value;
+    }
+
     partial void OnSelectedLibraryFilterChanged(string value)
     {
-        LibraryView.Refresh();
+        LibraryView?.Refresh();
     }
 
     private bool FilterLibraryItem(object item)
@@ -162,7 +191,7 @@ sdb dlog
             "Assinados" => record.Analysis.SignatureFound,
             "Apps" => !record.Analysis.IsWatchfaceCandidate,
             "Watchfaces" => record.Analysis.IsWatchfaceCandidate,
-            "Candidatos" => record.Analysis.IsShellCandidate || record.Analysis.IsWatchfaceCandidate || !record.Analysis.SignatureFound,
+            "Candidatos" => record.Analysis.IsWatchfaceCandidate || !record.Analysis.SignatureFound,
             _ => true
         };
     }
@@ -184,7 +213,13 @@ sdb dlog
                 return;
             }
 
-            var devices = await _sdbService.ListDevicesAsync(SdbPath).ConfigureAwait(true);
+            await _sdbService.RestartServerAsync(SdbPath, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(ConnectAddress))
+            {
+                await _sdbService.ConnectAsync(SdbPath, ConnectAddress, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            }
+
+            var devices = await _sdbService.ListDevicesAsync(SdbPath, message => _logService.Info("SDB", message)).ConfigureAwait(true);
             Devices.Clear();
             foreach (var device in devices)
             {
@@ -199,6 +234,84 @@ sdb dlog
             SelectedDevice ??= Devices.FirstOrDefault();
             StatusText = $"{Devices.Count} dispositivo(s) encontrado(s).";
             _logService.Info("Dispositivos", $"{Devices.Count} dispositivo(s) listados.");
+        }).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task ConnectByAddressAsync()
+    {
+        if (string.IsNullOrWhiteSpace(ConnectAddress))
+        {
+            MessageBox.Show("Informe o IP do relogio. Exemplo: 192.168.0.50", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(SdbPath) || !File.Exists(SdbPath))
+        {
+            MessageBox.Show("sdb.exe nao encontrado.", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        await ExecuteBusyAsync("Conectando ao relogio por IP", async () =>
+        {
+            var result = await _sdbService.ConnectAsync(SdbPath, ConnectAddress, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            if (!result.Succeeded)
+            {
+                StatusText = "Falha ao conectar por IP.";
+                _logService.Warn("SDB", "Falha ao conectar por IP.");
+                return;
+            }
+
+            var devices = await _sdbService.ListDevicesAsync(SdbPath, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            Devices.Clear();
+            foreach (var device in devices)
+            {
+                Devices.Add(device);
+            }
+
+            SelectedDevice = Devices.FirstOrDefault();
+            StatusText = $"{Devices.Count} dispositivo(s) encontrado(s).";
+            _logService.Info("Dispositivos", $"{Devices.Count} dispositivo(s) listados.");
+        }).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task ScanNetworkAsync()
+    {
+        if (string.IsNullOrWhiteSpace(SdbPath) || !File.Exists(SdbPath))
+        {
+            MessageBox.Show("sdb.exe nao encontrado.", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        await ExecuteBusyAsync("Buscando relogio na rede", async () =>
+        {
+            await _sdbService.RestartServerAsync(SdbPath, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            var targets = await _sdbService.ScanNetworkAsync(message => _logService.Info("Scan", message)).ConfigureAwait(true);
+
+            if (targets.Count == 0)
+            {
+                StatusText = "Nenhum relogio encontrado na rede.";
+                _logService.Warn("Scan", "Nenhum alvo SDB respondeu na porta 26101.");
+                return;
+            }
+
+            ConnectAddress = targets[0];
+            foreach (var target in targets)
+            {
+                await _sdbService.ConnectAsync(SdbPath, target, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            }
+
+            var devices = await _sdbService.ListDevicesAsync(SdbPath, message => _logService.Info("SDB", message)).ConfigureAwait(true);
+            Devices.Clear();
+            foreach (var device in devices)
+            {
+                Devices.Add(device);
+            }
+
+            SelectedDevice = Devices.FirstOrDefault();
+            StatusText = $"{Devices.Count} dispositivo(s) encontrado(s).";
+            _logService.Info("Scan", $"{targets.Count} alvo(s) SDB encontrado(s).");
         }).ConfigureAwait(true);
     }
 
@@ -240,6 +353,24 @@ sdb dlog
     }
 
     [RelayCommand]
+    private async Task RefreshDeviceStatusAsync()
+    {
+        if (SelectedDevice is null)
+        {
+            MessageBox.Show("Selecione um relogio para ler o status.", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        await ExecuteBusyAsync("Lendo status do relogio", async () =>
+        {
+            var status = await _sdbService.GetDeviceStatusAsync(SdbPath, SelectedDevice.Serial, message => _logService.Info("Status", message)).ConfigureAwait(true);
+            DeviceStatus = status;
+            DeviceStatusText = status.ToString();
+            StatusText = "Status do relogio atualizado.";
+        }).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
     private async Task UninstallSelectedAppAsync()
     {
         if (SelectedDevice is null || SelectedInstalledApp is null)
@@ -261,28 +392,100 @@ sdb dlog
 
         await ExecuteBusyAsync("Desinstalando aplicativo", async () =>
         {
+            var packageId = SelectedInstalledApp.PackageId;
+            UninstallLogText = string.Empty;
+            AppendUninstallLog($"Iniciando desinstalacao: {packageId}");
             var result = await _sdbService.UninstallAsync(SdbPath, SelectedDevice.Serial, SelectedInstalledApp.PackageId, message => _logService.Info("Desinstalação", message)).ConfigureAwait(true);
+            AppendCommandOutputToUninstallLog(result.StandardOutput);
+            AppendCommandOutputToUninstallLog(result.StandardError);
             if (result.Succeeded)
             {
+                AppendUninstallLog($"Desinstalacao concluida: {packageId}");
                 _logService.Info("Desinstalação", $"Remoção concluída: {SelectedInstalledApp.PackageId}");
                 StatusText = $"Remoção concluída: {SelectedInstalledApp.PackageId}";
+                MessageBox.Show($"App desinstalado: {SelectedInstalledApp.PackageId}", "Desinstalacao concluida", MessageBoxButton.OK, MessageBoxImage.Information);
                 await ReloadInstalledAppsAsync("Atualizando lista após remoção").ConfigureAwait(true);
             }
             else
             {
+                AppendUninstallLog($"Falha ao desinstalar {packageId}");
                 _logService.Error("Desinstalação", $"Falha ao remover {SelectedInstalledApp.PackageId}");
                 StatusText = $"Falha ao remover {SelectedInstalledApp.PackageId}";
+                MessageBox.Show($"Falha ao desinstalar {SelectedInstalledApp.PackageId}. Veja o diagnostico para detalhes.", "Erro ao desinstalar", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }).ConfigureAwait(true);
     }
 
     [RelayCommand]
-    private async Task ImportPackageAsync()
+    private async Task RefreshLibraryFromFolderAsync()
     {
-        var dialog = new OpenFileDialog
+        if (string.IsNullOrWhiteSpace(DownloadFolder) || !Directory.Exists(DownloadFolder))
         {
-            Filter = "Pacotes Tizen (*.wgt;*.tpk;*.zip)|*.wgt;*.tpk;*.zip|Todos os arquivos (*.*)|*.*",
-            Title = "Selecionar pacote Tizen"
+            MessageBox.Show("Selecione uma pasta de downloads valida primeiro.", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        await ExecuteBusyAsync("Atualizando biblioteca", async () =>
+        {
+            LibraryItems.Clear();
+            SelectedLibraryItem = null;
+            await _packageLibraryService.SaveAsync(LibraryItems).ConfigureAwait(true);
+            CleanupLegacyLocalLibrary();
+
+            var knownHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var files = Directory.EnumerateFiles(DownloadFolder, "*.*", SearchOption.AllDirectories)
+                .Where(IsPackageSourceFile)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var importedCount = 0;
+            var skippedCount = 0;
+
+            foreach (var file in files)
+            {
+                IReadOnlyList<TizenPackageInfo> imported;
+                try
+                {
+                    imported = await _packageImportService.ImportAsync(file, DownloadFolder).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    _logService.Warn("Biblioteca", $"Falha ao importar {Path.GetFileName(file)}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var candidate in imported)
+                {
+                    var analysis = await _packageAnalyzerService.AnalyzeAsync(candidate.StagedPath).ConfigureAwait(true);
+                    if (!string.IsNullOrWhiteSpace(analysis.Sha256) && !knownHashes.Add(analysis.Sha256))
+                    {
+                        DeleteDuplicateExtractedPackage(candidate);
+                        skippedCount++;
+                        continue;
+                    }
+
+                    PrepareAnalysis(candidate, analysis);
+                    var record = await _packageLibraryService.AddAsync(candidate, analysis).ConfigureAwait(true);
+                    LibraryItems.Add(record);
+                    SelectedLibraryItem = record;
+                    importedCount++;
+                }
+            }
+
+            LibraryView.Refresh();
+            StatusText = $"Biblioteca atualizada: {importedCount} novo(s), {skippedCount} duplicado(s).";
+            _logService.Info("Biblioteca", StatusText);
+        }).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task SelectDownloadFolderAsync()
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Selecionar pasta de downloads",
+            InitialDirectory = Directory.Exists(DownloadFolder) ? DownloadFolder : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
         };
 
         if (dialog.ShowDialog() != true)
@@ -290,25 +493,10 @@ sdb dlog
             return;
         }
 
-        await ExecuteBusyAsync("Importando pacote", async () =>
-        {
-            var imported = await _packageImportService.ImportAsync(dialog.FileName, WorkingFolder).ConfigureAwait(true);
-            await HandleImportedCandidatesAsync(imported).ConfigureAwait(true);
-        }).ConfigureAwait(true);
-    }
-
-    [RelayCommand]
-    private async Task ImportSelectedCandidateAsync()
-    {
-        if (SelectedImportCandidate is null)
-        {
-            return;
-        }
-
-        await ExecuteBusyAsync("Analisando pacote", async () =>
-        {
-            await AddCandidateToLibraryAsync(SelectedImportCandidate).ConfigureAwait(true);
-        }).ConfigureAwait(true);
+        DownloadFolder = dialog.FolderName;
+        await _settingsService.SaveAsync(_settings).ConfigureAwait(true);
+        _logService.Info("Configuração", $"Pasta de downloads selecionada: {DownloadFolder}");
+        await RefreshLibraryFromFolderAsync().ConfigureAwait(true);
     }
 
     [RelayCommand]
@@ -337,21 +525,28 @@ sdb dlog
 
         await ExecuteBusyAsync("Instalando pacote no relógio", async () =>
         {
+            InstallLogText = string.Empty;
             var result = await _sdbService.InstallAsync(
                 SdbPath,
                 SelectedDevice.Serial,
                 SelectedLibraryItem.Package,
-                message => _logService.Info("Instalação", message)).ConfigureAwait(true);
+                message =>
+                {
+                    _logService.Info("Instalação", message);
+                    AppendInstallLog(message);
+                }).ConfigureAwait(true);
 
             if (result.Succeeded)
             {
                 _logService.Info("Instalação", $"Instalação concluída: {SelectedLibraryItem.Package.FileName}");
+                AppendInstallLog($"Instalacao concluida: {SelectedLibraryItem.Package.FileName}");
                 StatusText = $"Instalação concluída: {SelectedLibraryItem.Package.FileName}";
                 await ReloadInstalledAppsAsync("Atualizando lista após instalação").ConfigureAwait(true);
             }
             else
             {
                 _logService.Error("Instalação", $"Falha ao instalar {SelectedLibraryItem.Package.FileName}");
+                AppendInstallLog($"Falha ao instalar {SelectedLibraryItem.Package.FileName}");
                 StatusText = $"Falha ao instalar {SelectedLibraryItem.Package.FileName}";
             }
         }).ConfigureAwait(true);
@@ -366,7 +561,7 @@ sdb dlog
         }
 
         var confirm = MessageBox.Show(
-            $"Deseja excluir {SelectedLibraryItem.Package.FileName} da biblioteca?",
+            $"Deseja excluir {SelectedLibraryItem.Package.FileName} da biblioteca e apagar o arquivo original do disco?",
             "Confirmar exclusão",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
@@ -378,10 +573,15 @@ sdb dlog
 
         await ExecuteBusyAsync("Excluindo da biblioteca", async () =>
         {
-            await _packageLibraryService.RemoveAsync(SelectedLibraryItem.Id).ConfigureAwait(true);
+            var warnings = await _packageLibraryService.RemoveAsync(SelectedLibraryItem.Id, deleteOriginal: true).ConfigureAwait(true);
             LibraryItems.Remove(SelectedLibraryItem);
             LibraryView.Refresh();
             SelectedLibraryItem = null;
+            foreach (var warning in warnings)
+            {
+                _logService.Warn("Biblioteca", warning);
+            }
+
             _logService.Info("Biblioteca", "Item removido da biblioteca local.");
             StatusText = "Item removido da biblioteca local.";
         }).ConfigureAwait(true);
@@ -404,32 +604,8 @@ sdb dlog
     [RelayCommand]
     private async Task OpenXdaAsync()
     {
-        _browserService.Open("https://xdaforums.com/");
+        _browserService.Open("https://xdaforums.com/t/root-required-how-to-extract-gear-s3-watch-faces-and-apps-from-the-galaxy-store.4687851/");
         await Task.CompletedTask;
-    }
-
-    [RelayCommand]
-    private async Task DownloadFromUrlAsync()
-    {
-        if (string.IsNullOrWhiteSpace(SourceUrl))
-        {
-            MessageBox.Show("Cole um link direto para baixar.", "Tizen Loader BR Desktop", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        await ExecuteBusyAsync("Baixando fonte", async () =>
-        {
-            var progress = new Progress<string>(message =>
-            {
-                BusyMessage = message;
-                _logService.Info("Download", message);
-            });
-
-            var filePath = await _downloadService.DownloadAsync(SourceUrl.Trim(), DownloadFolder, progress).ConfigureAwait(true);
-            _logService.Info("Download", $"Arquivo salvo em {filePath}");
-            var imported = await _packageImportService.ImportAsync(filePath, WorkingFolder).ConfigureAwait(true);
-            await HandleImportedCandidatesAsync(imported).ConfigureAwait(true);
-        }).ConfigureAwait(true);
     }
 
     [RelayCommand]
@@ -513,6 +689,37 @@ sdb dlog
         }
     }
 
+    private void AppendInstallLog(string message)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        InstallLogText = string.IsNullOrWhiteSpace(InstallLogText)
+            || InstallLogText.Equals("O log de instalacao aparece aqui.", StringComparison.OrdinalIgnoreCase)
+                ? line
+                : $"{InstallLogText}{Environment.NewLine}{line}";
+    }
+
+    private void AppendUninstallLog(string message)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        UninstallLogText = string.IsNullOrWhiteSpace(UninstallLogText)
+            || UninstallLogText.Equals("O log de desinstalacao aparece aqui.", StringComparison.OrdinalIgnoreCase)
+                ? line
+                : $"{UninstallLogText}{Environment.NewLine}{line}";
+    }
+
+    private void AppendCommandOutputToUninstallLog(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return;
+        }
+
+        foreach (var line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            AppendUninstallLog(line);
+        }
+    }
+
     private async Task ReloadInstalledAppsAsync(string message)
     {
         if (SelectedDevice is null)
@@ -531,6 +738,63 @@ sdb dlog
         if (!string.IsNullOrWhiteSpace(message))
         {
             StatusText = message;
+        }
+    }
+
+    private static bool IsPackageSourceFile(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".wgt", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".tpk", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".zip", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void DeleteDuplicateExtractedPackage(TizenPackageInfo candidate)
+    {
+        if (!candidate.IsFromArchive
+            || string.IsNullOrWhiteSpace(candidate.StagedPath)
+            || string.IsNullOrWhiteSpace(candidate.SourcePath)
+            || candidate.StagedPath.Equals(candidate.SourcePath, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(candidate.StagedPath))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(candidate.StagedPath);
+        }
+        catch
+        {
+        }
+    }
+
+    private void CleanupLegacyLocalLibrary()
+    {
+        try
+        {
+            if (Directory.Exists(AppPaths.LibraryFolder))
+            {
+                Directory.Delete(AppPaths.LibraryFolder, recursive: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logService.Warn("Biblioteca", $"Nao foi possivel limpar biblioteca antiga local: {ex.Message}");
+        }
+    }
+
+    private static void PrepareAnalysis(TizenPackageInfo candidate, PackageAnalysisResult analysis)
+    {
+        if (!analysis.SignatureFound)
+        {
+            analysis.Warnings.Add("Assinatura ausente");
+            analysis.Warnings.Add("Pode falhar por certificado");
+        }
+
+        if (!string.IsNullOrWhiteSpace(analysis.PackageId))
+        {
+            candidate.DisplayName = string.IsNullOrWhiteSpace(analysis.Name) ? candidate.DisplayName : analysis.Name;
         }
     }
 

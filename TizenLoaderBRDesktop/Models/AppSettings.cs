@@ -6,6 +6,8 @@ public sealed class AppSettings
 
     public string LastDeviceSerial { get; set; } = string.Empty;
 
+    public string LastConnectAddress { get; set; } = string.Empty;
+
     public string WorkingFolder { get; set; } = string.Empty;
 
     public string DownloadFolder { get; set; } = string.Empty;
